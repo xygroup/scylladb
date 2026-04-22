@@ -32,7 +32,7 @@
           inherit pkgs repl;
         };
 
-        package = import ./default.nixpkgs args;
+        package = import ./default.nix args;
         devShell = import ./shell.nix args;
       in {
         inherit pkgs args package devShell;
