@@ -15,6 +15,9 @@
         pkgs = import nixpkgs {
           inherit system;
           overlays = [ self.overlays.default ];
+          config = {
+            permittedInsecurePackages = [ "python-2.7.18.7" "python-2.7.18.8" ];
+          };
         };
 
         repl = pkgs.writeText "repl" ''
