@@ -6,13 +6,13 @@
 #
 
 #
-# * "nix build" is unsupported (or rather supported up to and not including
-#   installPhase), so basically all this is just for "nix develop"
+# "nix build" produces a full ScyllaDB installation under $out/opt/scylladb
+# with binaries, libraries, configs, scripts, and systemd units.
 #
-# * IMPORTANT: to avoid using up ungodly amounts of disk space under
-#   /nix/store/ when you are not using flakes, make sure to move the
-#   actual build directory outside this tree and make ./build a
-#   symlink to it.  Or use flakes (seriously, just use flakes).
+# IMPORTANT: to avoid using up ungodly amounts of disk space under
+# /nix/store/ when you are not using flakes, make sure to move the
+# actual build directory outside this tree and make ./build a
+# symlink to it.  Or use flakes (seriously, just use flakes).
 #
 
 { flake ? false
@@ -110,6 +110,7 @@ in derive ({
       tabulate
       urwid
     ]))
+    patchelf
     ragel
     rustc
     stow
@@ -184,12 +185,110 @@ in derive ({
       build/${mode}/iotune \
 
   '';
-   #   build/${mode}/dist/tar/scylla-tools-package.tar.gz \
-   #   build/${mode}/dist/tar/scylla-jmx-package.tar.gz \
 
-  installPhase = ''
-    echo not implemented 1>&2
-    exit 1
+  installPhase = let
+    python3 = pkgs.python3.withPackages (ps: with ps; [
+      pyyaml psutil distro pyudev requests setuptools
+    ]);
+  in ''
+    runHook preInstall
+
+    # Create the relocatable package (self-contained tarball with
+    # binaries, shared libs, configs, scripts)
+    patchShebangs scripts/create-relocatable-package.py
+    ${python3}/bin/python3 scripts/create-relocatable-package.py \
+      --build-dir build/${mode} \
+      --node-exporter-dir build/node_exporter \
+      --debian-dir build/debian/debian \
+      build/scylla-package.tar.gz || true
+
+    # If the relocatable package script fails (e.g. missing node_exporter),
+    # fall back to manual installation from build artifacts.
+    if [ ! -f build/scylla-package.tar.gz ]; then
+      echo "Relocatable package not created, installing manually..."
+
+      # Create the installation layout directly
+      local prefix="$out/opt/scylladb"
+      mkdir -p "$prefix"/{bin,libexec,libreloc,scripts,conf}
+      mkdir -p "$out/etc/scylla" "$out/etc/scylla.d"
+
+      # Binaries
+      cp build/${mode}/scylla "$prefix/libexec/"
+      cp build/${mode}/iotune "$prefix/libexec/"
+      chmod 755 "$prefix/libexec/"*
+
+      # Gather shared library dependencies
+      for exe in "$prefix/libexec/scylla" "$prefix/libexec/iotune"; do
+        for lib in $(ldd "$exe" | grep "=> /" | awk '{print $3}'); do
+          basename=$(basename "$lib")
+          [ ! -f "$prefix/libreloc/$basename" ] && cp "$lib" "$prefix/libreloc/" || true
+        done
+        # Also copy the dynamic linker
+        local ld_so=$(ldd "$exe" | grep "ld-linux" | awk '{print $1}')
+        [ -n "$ld_so" ] && [ ! -f "$prefix/libreloc/ld.so" ] && cp "$ld_so" "$prefix/libreloc/ld.so" || true
+      done
+      chmod 755 "$prefix/libreloc/"*
+
+      # Create wrapper scripts that set LD_LIBRARY_PATH
+      for bin in scylla iotune; do
+        cat > "$prefix/bin/$bin" <<WRAPPER
+    #!/bin/bash -e
+    [[ -z "\$LD_PRELOAD" ]] || { echo "\$0: not compatible with LD_PRELOAD" >&2; exit 110; }
+    export LD_LIBRARY_PATH="/opt/scylladb/libreloc"
+    exec -a "\$0" "/opt/scylladb/libexec/$bin" "\$@"
+    WRAPPER
+        chmod 755 "$prefix/bin/$bin"
+      done
+
+      # Config files
+      cp conf/* "$out/etc/scylla/"
+
+      # Scripts
+      cp -r dist/common/scripts/* "$prefix/scripts/"
+      patchShebangs "$prefix/scripts/"
+
+      # Seastar scripts
+      mkdir -p "$prefix/scripts"
+      cp seastar/scripts/seastar-cpu-map.sh "$prefix/scripts/"
+
+      # Systemd units
+      mkdir -p "$out/lib/systemd/system"
+      cp dist/common/systemd/*.service "$out/lib/systemd/system/" || true
+      cp dist/common/systemd/*.slice "$out/lib/systemd/system/" || true
+      cp dist/common/systemd/*.timer "$out/lib/systemd/system/" || true
+
+    else
+      # Unpack relocatable package and run install.sh
+      mkdir -p unpack
+      tar xzf build/scylla-package.tar.gz -C unpack
+      cd unpack/scylla
+
+      patchShebangs install.sh
+      # install.sh uses its own install() wrapper that adds -Z (SELinux context)
+      # which fails on NixOS. Patch it out.
+      sed -i 's/command install -Z/command install/' install.sh
+
+      bash install.sh \
+        --root "$out" \
+        --prefix /opt/scylladb \
+        --packaging \
+        --without-systemd
+
+      # Install systemd units separately
+      mkdir -p "$out/lib/systemd/system"
+      cp dist/common/systemd/*.service "$out/lib/systemd/system/" || true
+      cp dist/common/systemd/*.slice "$out/lib/systemd/system/" || true
+      cp dist/common/systemd/*.timer "$out/lib/systemd/system/" || true
+
+      cd ../..
+    fi
+
+    # Create usr/bin symlinks
+    mkdir -p "$out/usr/bin"
+    ln -sf /opt/scylladb/bin/scylla "$out/usr/bin/scylla"
+    ln -sf /opt/scylladb/bin/iotune "$out/usr/bin/iotune"
+
+    runHook postInstall
   '';
 
 })
