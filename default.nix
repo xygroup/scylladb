@@ -176,6 +176,25 @@ in derive ({
     patchShebangs ./configure.py
     patchShebangs ./seastar/scripts/seastar-json2code.py
     patchShebangs ./seastar/cooking.sh
+
+    # Pre-create version files so SCYLLA-VERSION-GEN doesn't
+    # try to use git (which fails in the Nix sandbox).
+    mkdir -p build
+    echo "6.2.0" > build/SCYLLA-VERSION-FILE
+    echo "0" > build/SCYLLA-RELEASE-FILE
+    echo "scylla" > build/SCYLLA-PRODUCT-FILE
+
+    # Also create them at the top level for install.sh
+    echo "6.2.0" > SCYLLA-VERSION-FILE
+    echo "0" > SCYLLA-RELEASE-FILE
+    echo "scylla" > SCYLLA-PRODUCT-FILE
+
+    # Patch SCYLLA-VERSION-GEN to be a no-op (files already exist)
+    cat > SCYLLA-VERSION-GEN <<'VGEN'
+    #!/bin/sh
+    exit 0
+    VGEN
+    chmod +x SCYLLA-VERSION-GEN
   '';
 
   configurePhase = "./configure.py${if verbose then " --verbose" else ""} --mode=${mode}";
