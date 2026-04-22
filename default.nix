@@ -84,6 +84,7 @@ in derive ({
     cargo
     cmake
     cxx-rs
+    doxygen
     gcc
     openjdk11_headless
     libtool
